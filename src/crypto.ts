@@ -23,22 +23,31 @@ export class Sealer {
       .then((digest) => crypto.subtle.importKey("raw", digest, "AES-GCM", false, ["encrypt", "decrypt"]));
   }
 
-  async seal(plain: string): Promise<string> {
+  /**
+   * `context` says what the value is for (e.g. "upload-ticket"). It is authenticated but not stored,
+   * so a value sealed for one purpose can never be opened as another.
+   */
+  async seal(plain: string, context: string): Promise<string> {
     const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
-    const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await this.key, new TextEncoder().encode(plain));
+    const encoder = new TextEncoder();
+    const cipher = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, additionalData: encoder.encode(context) },
+      await this.key,
+      encoder.encode(plain),
+    );
     const sealed = new Uint8Array(IV_BYTES + cipher.byteLength);
     sealed.set(iv, 0);
     sealed.set(new Uint8Array(cipher), IV_BYTES);
     return toBase64Url(sealed);
   }
 
-  /** Returns null for anything that was not sealed with this key (tampered, truncated, wrong key). */
-  async open(sealed: string): Promise<string | null> {
+  /** Returns null for anything not sealed with this key and context (tampered, truncated, wrong key or purpose). */
+  async open(sealed: string, context: string): Promise<string | null> {
     try {
       const bytes = fromBase64Url(sealed);
       if (bytes.byteLength <= IV_BYTES) return null;
       const plain = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: bytes.slice(0, IV_BYTES) },
+        { name: "AES-GCM", iv: bytes.slice(0, IV_BYTES), additionalData: new TextEncoder().encode(context) },
         await this.key,
         bytes.slice(IV_BYTES),
       );

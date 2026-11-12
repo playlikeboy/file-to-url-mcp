@@ -288,7 +288,7 @@ describe("FileService lookups", () => {
     const outsider = new FileService({
       store: context.store,
       storage: new UploadThingClient({ apiKey: "sk_other", appId: "other-app" }, context.uploadThing.fetch),
-      config: { ...context.service.limits, appId: "other-app" },
+      config: { ...context.service.limits, tenantId: "other-tenant" },
       now: () => context.clock.now,
     });
 
@@ -301,7 +301,23 @@ describe("FileService lookups", () => {
     expect((await context.service.get(view.id)).id).toBe(view.id);
   });
 
-  test("records the account before uploading and exposes its upload ticket", async () => {
+  test("discards the stored bytes when the account cannot be recorded", async () => {
+    const base = createTestContext();
+    const service = new FileService({
+      store: base.store,
+      storage: new UploadThingClient({ apiKey: "sk", appId: APP_ID }, base.uploadThing.fetch),
+      config: base.service.limits,
+      rememberTenant: async () => {
+        throw new Error("vault unavailable");
+      },
+    });
+
+    await expect(service.upload({ name: "a.txt", size: HELLO.byteLength, body: HELLO, source: "text" })).rejects.toThrow("vault unavailable");
+    expect(base.uploadThing.files.size).toBe(0);
+    expect(await service.list(10, 0)).toEqual([]);
+  });
+
+  test("records the account once its upload has succeeded, and exposes its upload ticket", async () => {
     const base = createTestContext();
     const rememberTenant = vi.fn(async () => undefined);
     const service = new FileService({
@@ -490,7 +506,9 @@ describe("FileService downloads and cleanup", () => {
     context.clock.now = NOW + 601;
     context.uploadThing.failNext("deleteFiles", 500);
 
-    await expect(context.cleanup()).rejects.toThrow(/deleteFiles failed/);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    expect(await context.cleanup()).toBe(0);
     expect(await context.service.exists(view.id)).toBe(true);
     expect(await context.cleanup()).toBe(1);
   });

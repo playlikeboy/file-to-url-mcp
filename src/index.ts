@@ -7,8 +7,8 @@ import { CORS_HEADERS, errorResponse, handleDirectUpload, handleDownload, jsonRe
 import { SERVER_NAME, SERVER_VERSION, createMcpServer } from "./mcp";
 import { FileService, LinkReader } from "./service";
 import { D1FileStore, D1TenantKeyStore } from "./store";
-import { TenantVault } from "./tenants";
-import { UploadThingClient, parseUploadThingToken, type UploadThingConfig } from "./uploadthing";
+import { TenantVault, tenantFor, type Tenant } from "./tenants";
+import { UploadThingClient, parseUploadThingToken } from "./uploadthing";
 import { UserError } from "./util";
 
 export interface Env {
@@ -32,11 +32,11 @@ const DOWNLOAD_ROUTE = /^\/([0-9A-Za-z]{7})(?:\.[A-Za-z0-9]{1,10})?\/?$/;
 const TOKEN_HELP =
   "Pass your UPLOADTHING_TOKEN as 'Authorization: Bearer <token>', an 'x-api-key' header, or '?token=<token>' on the URL.";
 
-function buildVault(env: Env): TenantVault {
+async function buildVault(env: Env): Promise<TenantVault> {
   return new TenantVault({
     keys: new D1TenantKeyStore(env.DB),
     sealer: env.TOKEN_ENCRYPTION_KEY ? new Sealer(env.TOKEN_ENCRYPTION_KEY) : null,
-    fallback: env.UPLOADTHING_TOKEN ? parseUploadThingToken(env.UPLOADTHING_TOKEN) : null,
+    fallback: env.UPLOADTHING_TOKEN ? await tenantFor(parseUploadThingToken(env.UPLOADTHING_TOKEN)) : null,
   });
 }
 
@@ -55,13 +55,14 @@ export function callerToken(request: Request, url: URL): string | null {
 }
 
 /** Whose UploadThing account this request acts on: an upload ticket, the caller's own token, or the default. */
-async function resolveTenant(request: Request, url: URL, vault: TenantVault): Promise<UploadThingConfig> {
-  const ticket = url.searchParams.get("ticket");
+async function resolveTenant(request: Request, url: URL, vault: TenantVault, allowTicket: boolean): Promise<Tenant> {
+  // A ticket is an upload-only grant: it is never honoured on the MCP route, so it cannot manage files or renew itself.
+  const ticket = allowTicket ? url.searchParams.get("ticket") : null;
   if (ticket) return vault.redeemTicket(ticket);
   const token = callerToken(request, url);
   if (token) {
     try {
-      return parseUploadThingToken(token);
+      return await tenantFor(parseUploadThingToken(token));
     } catch {
       throw new UserError(`That is not a valid UPLOADTHING_TOKEN (copy it from the UploadThing dashboard, API Keys tab). ${TOKEN_HELP}`, 401);
     }
@@ -74,20 +75,25 @@ function baseUrlFor(env: Env, origin: string): string {
   return (env.PUBLIC_BASE_URL || origin).replace(/\/+$/, "");
 }
 
-function buildService(env: Env, baseUrl: string, tenant: UploadThingConfig, store: D1FileStore, vault: TenantVault): FileService {
+function buildService(env: Env, baseUrl: string, tenant: Tenant, store: D1FileStore, vault: TenantVault): FileService {
   const maxFileMb = Number(env.MAX_FILE_MB) > 0 ? Number(env.MAX_FILE_MB) : DEFAULT_MAX_FILE_MB;
+  const storage = new UploadThingClient(tenant.credentials);
   return new FileService({
     store,
-    storage: new UploadThingClient(tenant),
+    storage,
     config: {
-      appId: tenant.appId,
+      tenantId: tenant.id,
       baseUrl,
       defaultExpiry: env.DEFAULT_EXPIRY || "1d",
       maxFileBytes: maxFileMb * BYTES_PER_MB,
       maxBufferedBytes: MAX_BUFFERED_BYTES,
     },
     rememberTenant: () => vault.remember(tenant),
-    issueUploadTicket: () => vault.issueTicket(tenant),
+    issueUploadTicket: async () => {
+      if (vault.isDefault(tenant.id)) return null;
+      await storage.getUsage(); // proves the key is real before anything is stored for it
+      return vault.issueTicket(tenant);
+    },
   });
 }
 
@@ -143,7 +149,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (download) return handleDownload(request, download[1], new LinkReader(store));
 
   const baseUrl = baseUrlFor(env, url.origin);
-  const vault = buildVault(env);
+  const vault = await buildVault(env);
   if (url.pathname === "/") return infoResponse(env, baseUrl, vault.defaultTenant !== null);
 
   const isMcp = url.pathname === "/mcp" || url.pathname === "/mcp/";
@@ -151,7 +157,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (!isMcp && !isUpload) return jsonResponse({ success: false, error: "Not found." }, 404);
   if (isMcp && request.method !== "POST") return methodNotAllowed();
 
-  const tenant = await resolveTenant(request, url, vault);
+  const tenant = await resolveTenant(request, url, vault, isUpload);
   const service = buildService(env, baseUrl, tenant, store, vault);
   return isMcp ? handleMcp(request, service) : handleDirectUpload(request, service);
 }
@@ -166,12 +172,12 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    const vault = buildVault(env);
+    const vault = await buildVault(env);
     const cleanup = cleanupExpired({
       store: new D1FileStore(env.DB),
-      storageFor: async (appId) => {
-        const tenant = await vault.credentials(appId);
-        return tenant ? new UploadThingClient(tenant) : null;
+      storageFor: async (tenantId) => {
+        const credentials = await vault.credentials(tenantId);
+        return credentials ? new UploadThingClient(credentials) : null;
       },
       now: () => Math.floor(Date.now() / 1000),
     });

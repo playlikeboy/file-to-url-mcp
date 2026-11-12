@@ -4,8 +4,8 @@ export type FileSource = "url" | "text" | "base64" | "direct";
 
 export interface FileRecord {
   readonly id: string;
-  /** UploadThing app that owns the file. */
-  readonly appId: string;
+  /** Account that owns the file (a hash of its API key, see tenants.ts). */
+  readonly tenantId: string;
   readonly fileKey: string;
   readonly name: string;
   readonly size: number;
@@ -25,7 +25,7 @@ export interface FilePatch {
 }
 
 export interface ListOptions {
-  readonly appId: string;
+  readonly tenantId: string;
   readonly limit: number;
   readonly offset: number;
   /** Unix seconds; files already expired or out of downloads are excluded. */
@@ -48,12 +48,12 @@ export interface FileStore {
   /** Files past their expiry time or download limit. */
   findDead(now: number, limit: number): Promise<readonly FileRecord[]>;
   deleteMany(ids: readonly string[]): Promise<void>;
-  stats(appId: string): Promise<StoreStats>;
+  stats(tenantId: string): Promise<StoreStats>;
 }
 
 interface FileRow {
   id: string;
-  app_id: string;
+  tenant_id: string;
   file_key: string;
   name: string;
   size: number;
@@ -69,7 +69,7 @@ interface FileRow {
 function toRecord(row: FileRow): FileRecord {
   return {
     id: row.id,
-    appId: row.app_id,
+    tenantId: row.tenant_id,
     fileKey: row.file_key,
     name: row.name,
     size: row.size,
@@ -98,11 +98,11 @@ export class D1FileStore implements FileStore {
   async insert(record: FileRecord): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO files (id, app_id, file_key, name, size, content_type, direct_url, source, created_at, expires_at, max_downloads, download_count)
+        `INSERT INTO files (id, tenant_id, file_key, name, size, content_type, direct_url, source, created_at, expires_at, max_downloads, download_count)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
-        record.id, record.appId, record.fileKey, record.name, record.size, record.contentType, record.directUrl,
+        record.id, record.tenantId, record.fileKey, record.name, record.size, record.contentType, record.directUrl,
         record.source, record.createdAt, record.expiresAt, record.maxDownloads, record.downloadCount,
       )
       .run();
@@ -122,12 +122,12 @@ export class D1FileStore implements FileStore {
     const result = await this.db
       .prepare(
         `SELECT * FROM files
-         WHERE app_id = ?
+         WHERE tenant_id = ?
            AND (expires_at IS NULL OR expires_at > ?)
            AND (max_downloads IS NULL OR download_count < max_downloads)
          ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?`,
       )
-      .bind(options.appId, options.now, options.limit, options.offset)
+      .bind(options.tenantId, options.now, options.limit, options.offset)
       .all<FileRow>();
     return result.results.map(toRecord);
   }
@@ -179,36 +179,36 @@ export class D1FileStore implements FileStore {
     }
   }
 
-  async stats(appId: string): Promise<StoreStats> {
+  async stats(tenantId: string): Promise<StoreStats> {
     const row = await this.db
-      .prepare("SELECT COUNT(*) AS file_count, COALESCE(SUM(size), 0) AS total_bytes FROM files WHERE app_id = ?")
-      .bind(appId)
+      .prepare("SELECT COUNT(*) AS file_count, COALESCE(SUM(size), 0) AS total_bytes FROM files WHERE tenant_id = ?")
+      .bind(tenantId)
       .first<{ file_count: number; total_bytes: number }>();
     return { fileCount: row?.file_count ?? 0, totalBytes: row?.total_bytes ?? 0 };
   }
 }
 
-/** Encrypted UploadThing API keys, one per app, so the cron can delete that app's expired files. */
+/** Encrypted UploadThing credentials, one row per tenant, so the cron can delete that tenant's expired files. */
 export interface TenantKeyStore {
-  save(appId: string, sealedApiKey: string, now: number): Promise<void>;
-  find(appId: string): Promise<string | null>;
+  save(tenantId: string, sealedCredentials: string, now: number): Promise<void>;
+  find(tenantId: string): Promise<string | null>;
 }
 
 export class D1TenantKeyStore implements TenantKeyStore {
   constructor(private readonly db: D1Database) {}
 
-  async save(appId: string, sealedApiKey: string, now: number): Promise<void> {
+  async save(tenantId: string, sealedCredentials: string, now: number): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO tenants (app_id, api_key_enc, updated_at) VALUES (?, ?, ?)
-         ON CONFLICT (app_id) DO UPDATE SET api_key_enc = excluded.api_key_enc, updated_at = excluded.updated_at`,
+        `INSERT INTO tenants (tenant_id, credentials_enc, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT (tenant_id) DO UPDATE SET credentials_enc = excluded.credentials_enc, updated_at = excluded.updated_at`,
       )
-      .bind(appId, sealedApiKey, now)
+      .bind(tenantId, sealedCredentials, now)
       .run();
   }
 
-  async find(appId: string): Promise<string | null> {
-    const row = await this.db.prepare("SELECT api_key_enc FROM tenants WHERE app_id = ?").bind(appId).first<{ api_key_enc: string }>();
-    return row?.api_key_enc ?? null;
+  async find(tenantId: string): Promise<string | null> {
+    const row = await this.db.prepare("SELECT credentials_enc FROM tenants WHERE tenant_id = ?").bind(tenantId).first<{ credentials_enc: string }>();
+    return row?.credentials_enc ?? null;
   }
 }

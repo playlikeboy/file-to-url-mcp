@@ -20,8 +20,8 @@ import {
 } from "./util";
 
 export interface ServiceConfig {
-  /** UploadThing app this service acts for; callers only ever see this app's files. */
-  readonly appId: string;
+  /** Account this service acts for; callers only ever see this account's files. */
+  readonly tenantId: string;
   /** Public origin of this Worker, e.g. https://file2url.example.workers.dev */
   readonly baseUrl: string;
   readonly defaultExpiry: string;
@@ -154,11 +154,15 @@ export class FileService extends LinkReader {
     const name = sanitizeFilename(request.name);
     const contentType = bareMimeType(request.type) ?? guessContentType(name);
 
-    await this.rememberTenant();
     const uploaded = await this.storage.upload({ name, size: request.size, type: contentType, body: request.body });
+    // The upload proves the key is real, so only now is it kept for the cleanup cron.
+    await this.rememberTenant().catch(async (error: unknown) => {
+      await this.discard(uploaded.key);
+      throw error;
+    });
     const createdAt = this.now();
     const record = await this.persist({
-      appId: this.config.appId,
+      tenantId: this.config.tenantId,
       fileKey: uploaded.key,
       name,
       size: request.size,
@@ -196,7 +200,7 @@ export class FileService extends LinkReader {
   }
 
   async list(limit: number, offset: number): Promise<readonly FileView[]> {
-    const records = await this.store.list({ appId: this.config.appId, limit, offset, now: this.now() });
+    const records = await this.store.list({ tenantId: this.config.tenantId, limit, offset, now: this.now() });
     return records.map((record) => this.toView(record));
   }
 
@@ -232,7 +236,7 @@ export class FileService extends LinkReader {
   }
 
   async usage(): Promise<Record<string, unknown>> {
-    const [stats, usage] = await Promise.all([this.store.stats(this.config.appId), this.storage.getUsage()]);
+    const [stats, usage] = await Promise.all([this.store.stats(this.config.tenantId), this.storage.getUsage()]);
     return {
       tracked_files: stats.fileCount,
       tracked_size: formatBytes(stats.totalBytes),
@@ -279,7 +283,7 @@ export class FileService extends LinkReader {
     if (!candidate) return null;
     const byId = ID_PATTERN.test(candidate) ? await this.store.findById(candidate) : null;
     const record = byId ?? (await this.store.findByKey(candidate));
-    return record && record.appId === this.config.appId ? record : null;
+    return record && record.tenantId === this.config.tenantId ? record : null;
   }
 
   private assertSize(size: number): void {
@@ -290,6 +294,13 @@ export class FileService extends LinkReader {
         413,
       );
     }
+  }
+
+  /** Removes bytes that were stored but could not be tracked, so nothing is orphaned. */
+  private async discard(fileKey: string): Promise<void> {
+    await this.storage.deleteFiles([fileKey]).catch((error: unknown) => {
+      console.error("Failed to remove orphaned upload", fileKey, error);
+    });
   }
 
   /** Inserts with a fresh short id, retrying only on the (unlikely) id collision. */
@@ -311,9 +322,7 @@ export class FileService extends LinkReader {
       return null;
     });
     if (saved) return saved;
-    await this.storage.deleteFiles([fields.fileKey]).catch((error: unknown) => {
-      console.error("Failed to remove orphaned upload", fields.fileKey, error);
-    });
+    await this.discard(fields.fileKey);
     throw new Error(`Could not save file metadata: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
   }
 
@@ -384,7 +393,7 @@ function extractReference(ref: string): string | null {
   try {
     const segments = new URL(ref).pathname.split("/").filter(Boolean);
     if (segments.length === 0) return null;
-    // UploadThing: /f/<key> or /a/<appId>/<key>; ours: /<id>[.ext]
+    // UploadThing: /f/<key> or /a/<tenantId>/<key>; ours: /<id>[.ext]
     const last = segments[0] === "f" || segments[0] === "a" ? segments[segments.length - 1] : segments[0];
     return last.replace(/\.[A-Za-z0-9]{1,10}$/, "");
   } catch {

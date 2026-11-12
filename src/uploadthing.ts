@@ -60,6 +60,8 @@ export function parseUploadThingToken(token: string | undefined): UploadThingCon
     const cleaned = token.trim().replace(/^['"]|['"]$/g, "");
     const parsed = JSON.parse(atob(cleaned)) as Partial<UploadThingConfig>;
     if (typeof parsed.apiKey !== "string" || typeof parsed.appId !== "string") throw new Error("missing fields");
+    // Both values end up in a request header / hostname, so they must be plain tokens.
+    if (!/^[\x21-\x7e]+$/.test(parsed.apiKey) || !/^[a-z0-9]+$/i.test(parsed.appId)) throw new Error("unexpected characters");
     return { apiKey: parsed.apiKey, appId: parsed.appId };
   } catch {
     throw new Error("UPLOADTHING_TOKEN is malformed (expected the base64 token from the UploadThing dashboard).");

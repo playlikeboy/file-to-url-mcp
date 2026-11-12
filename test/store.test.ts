@@ -5,7 +5,7 @@ import { NOW, createTestD1 } from "./helpers";
 function record(overrides: Partial<FileRecord> = {}): FileRecord {
   return {
     id: "aaaaaaa",
-    appId: "app-a",
+    tenantId: "app-a",
     fileKey: "key-a",
     name: "a.txt",
     size: 10,
@@ -51,18 +51,18 @@ describe("D1FileStore", () => {
     await store.insert(record({ id: "mid0000", fileKey: "k2", createdAt: NOW - 20 }));
     await store.insert(record({ id: "new0000", fileKey: "k3", createdAt: NOW - 10 }));
 
-    const firstPage = await store.list({ appId: "app-a", limit: 2, offset: 0, now: NOW });
-    const secondPage = await store.list({ appId: "app-a", limit: 2, offset: 2, now: NOW });
+    const firstPage = await store.list({ tenantId: "app-a", limit: 2, offset: 0, now: NOW });
+    const secondPage = await store.list({ tenantId: "app-a", limit: 2, offset: 2, now: NOW });
 
     expect(firstPage.map((file) => file.id)).toEqual(["new0000", "mid0000"]);
     expect(secondPage.map((file) => file.id)).toEqual(["old0000"]);
   });
 
-  test("list and stats only cover the requested app", async () => {
+  test("list and stats only cover the requested account", async () => {
     await store.insert(record({ id: "mine000", fileKey: "k1", size: 7 }));
-    await store.insert(record({ id: "theirs0", fileKey: "k2", appId: "app-b", size: 100 }));
+    await store.insert(record({ id: "theirs0", fileKey: "k2", tenantId: "app-b", size: 100 }));
 
-    const listed = await store.list({ appId: "app-a", limit: 10, offset: 0, now: NOW });
+    const listed = await store.list({ tenantId: "app-a", limit: 10, offset: 0, now: NOW });
 
     expect(listed.map((file) => file.id)).toEqual(["mine000"]);
     expect(await store.stats("app-a")).toEqual({ fileCount: 1, totalBytes: 7 });
@@ -75,7 +75,7 @@ describe("D1FileStore", () => {
     await store.insert(record({ id: "expired", fileKey: "k3", expiresAt: NOW - 1 }));
     await store.insert(record({ id: "burned0", fileKey: "k4", maxDownloads: 1, downloadCount: 1 }));
 
-    const listed = await store.list({ appId: "app-a", limit: 10, offset: 0, now: NOW });
+    const listed = await store.list({ tenantId: "app-a", limit: 10, offset: 0, now: NOW });
 
     expect(listed.map((file) => file.id).sort()).toEqual(["forever", "live000"]);
   });

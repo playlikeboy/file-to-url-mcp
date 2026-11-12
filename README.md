@@ -159,6 +159,9 @@ Project layout: `src/index.ts` (routing, auth, cron), `src/mcp.ts` (tools), `src
 
 ## Security notes
 
+- Your account is tied to the secret API key inside your token, not to the app id (app ids are public). Rotating the key starts a fresh, empty file list.
+- A token passed as `?token=` is part of the URL and can end up in logs; prefer the `Authorization` header where the client allows it.
+
 - There is no rate limiting.
 - The shared default account is open to everyone.
 - Links use unguessable 7-character random ids, but anyone who has a link can download the file.

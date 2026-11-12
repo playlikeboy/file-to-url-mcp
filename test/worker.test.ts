@@ -328,6 +328,48 @@ describe("bring your own UploadThing token", () => {
     expect(uploadThing.files.size).toBe(2);
   });
 
+  test("a forged token naming another account's public app id cannot reach that account's files", async () => {
+    const bobs = await callTool("upload_text", { content: "bob", filename: "bob.txt" }, AS_BOB);
+    const forged = btoa(JSON.stringify({ apiKey: "sk_attacker_guess", appId: "bobapp", regions: ["sea1"] }));
+    const asForger = { headers: { authorization: `Bearer ${forged}` } };
+
+    const listed = await callTool("list_files", {}, asForger);
+    const read = await callTool("get_file", { file: bobs.data.id }, asForger);
+    const retimed = await callTool("update_file", { file: bobs.data.id, expires_in: "1m" }, asForger);
+    const deleted = await callTool("delete_files", { files: [bobs.data.id] }, asForger);
+    const stillBobs = await callTool("get_file", { file: bobs.data.id }, AS_BOB);
+
+    expect(listed.data.files).toEqual([]);
+    expect(read.isError).toBe(true);
+    expect(retimed.isError).toBe(true);
+    expect(deleted.data.deleted).toEqual([]);
+    expect(stillBobs.data.expires_at).toBe(bobs.data.expires_at);
+  });
+
+  test("a forged token cannot overwrite the key the cron uses for the real account", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const bobs = await callTool("upload_text", { content: "once", filename: "once.txt", max_downloads: 1 }, AS_BOB);
+    const forged = btoa(JSON.stringify({ apiKey: "sk_attacker_guess", appId: "bobapp", regions: ["sea1"] }));
+    await callTool("create_upload_url", { filename: "x.bin" }, { headers: { authorization: `Bearer ${forged}` } });
+    await request(`/${bobs.data.id}`);
+    const pending: Promise<unknown>[] = [];
+    const ctx = { waitUntil: (promise: Promise<unknown>) => void pending.push(promise) } as unknown as ExecutionContext;
+
+    await worker.scheduled({} as ScheduledController, env, ctx);
+    await Promise.all(pending);
+
+    expect(apiKeysUsed("deleteFiles")).toEqual([BOB_KEY]);
+    expect(uploadThing.files.size).toBe(0);
+  });
+
+  test("the default account's own token reaches the same files as using no token", async () => {
+    const shared = await callTool("upload_text", { content: "shared", filename: "shared.txt" });
+
+    const viaToken = await callTool("get_file", { file: shared.data.id }, { headers: { authorization: `Bearer ${TOKEN}` } });
+
+    expect(viaToken.data.id).toBe(shared.data.id);
+  });
+
   test("a file's short link needs no token, whoever uploaded it", async () => {
     const bobs = await callTool("upload_text", { content: "bob's file", filename: "bob.txt" }, AS_BOB);
 
@@ -359,6 +401,45 @@ describe("bring your own UploadThing token", () => {
     expect(uploaded.status).toBe(201);
     expect(apiKeysUsed("prepareUpload")).toEqual([BOB_KEY]);
     expect(listed.data.count).toBe(1);
+  });
+
+  test("an upload ticket is only an upload grant: it does not work on the MCP route", async () => {
+    const bobs = await callTool("upload_text", { content: "bob", filename: "bob.txt" }, AS_BOB);
+    const issued = await callTool("create_upload_url", { filename: "clip.mp4" }, AS_BOB);
+    const ticket = new URL(issued.data.upload_url).searchParams.get("ticket") as string;
+    const viaTicket = { query: `?ticket=${encodeURIComponent(ticket)}` };
+
+    const listed = await callTool("list_files", {}, viaTicket);
+    const deleted = await callTool("delete_files", { files: [bobs.data.id] }, viaTicket);
+    const renewed = await callTool("create_upload_url", { filename: "again.mp4" }, viaTicket);
+
+    expect(listed.data.files).toEqual([]);
+    expect(deleted.data.deleted).toEqual([]);
+    expect(renewed.data.upload_url).not.toContain("ticket=");
+    expect(uploadThing.files.size).toBe(1);
+  });
+
+  test("create_upload_url refuses a token UploadThing does not accept, and stores nothing for it", async () => {
+    uploadThing.failNext("getUsageInfo", 401);
+
+    const outcome = await callTool("create_upload_url", { filename: "clip.mp4" }, AS_BOB);
+    const stored = (await env.DB.prepare("SELECT COUNT(*) AS n FROM tenants").first()) as { n: number };
+
+    expect(outcome.isError).toBe(true);
+    expect(outcome.text).toContain("UploadThing rejected the API key");
+    expect(stored.n).toBe(0);
+  });
+
+  test("a token with unexpected characters in its app id is refused", async () => {
+    const hostile = btoa(JSON.stringify({ apiKey: "sk_x", appId: "evil.example/x#", regions: [] }));
+
+    const response = await request("/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${hostile}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+
+    expect(response.status).toBe(401);
   });
 
   test("create_upload_url needs no ticket for the default account", async () => {
@@ -474,6 +555,6 @@ describe("scheduled cleanup", () => {
     uploadThing.failNext("deleteFiles", 500);
 
     await expect(runScheduled()).resolves.toBeDefined();
-    expect(log).toHaveBeenCalledWith("Expired file cleanup failed", expect.anything());
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("Cleanup failed for account"), expect.anything());
   });
 });

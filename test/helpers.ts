@@ -10,13 +10,14 @@ export const APP_ID = "testapp";
 export const API_KEY = "sk_test_key";
 export const TOKEN = btoa(JSON.stringify({ apiKey: API_KEY, appId: APP_ID, regions: ["sea1"] }));
 export const NOW = 1_800_000_000;
+export const TENANT_ID = "tenant-under-test";
 
 type SqlValue = string | number | null;
 
 /** Just enough of the D1 API, backed by an in-memory SQLite database running the real migration. */
 export function createTestD1(): D1Database {
   const db = new DatabaseSync(":memory:");
-  for (const migration of ["0001_init.sql", "0002_tenants.sql"]) {
+  for (const migration of ["0001_init.sql", "0002_tenants.sql", "0003_tenant_ids.sql"]) {
     db.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
   const statement = (sql: string, params: SqlValue[]) => ({
@@ -158,7 +159,7 @@ export function createTestContext(
   const service = new FileService({
     store,
     storage,
-    config: { appId: APP_ID, baseUrl: BASE_URL, defaultExpiry: "1d", maxFileBytes: 1024 * 1024, maxBufferedBytes: 64 * 1024, ...overrides },
+    config: { tenantId: TENANT_ID, baseUrl: BASE_URL, defaultExpiry: "1d", maxFileBytes: 1024 * 1024, maxBufferedBytes: 64 * 1024, ...overrides },
     now: () => clock.now,
     fetchImpl: sourceFetch,
   });
