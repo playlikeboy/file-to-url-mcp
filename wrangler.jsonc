@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "file2url",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "file2url",
+      "database_id": "b14728eb-27d6-4378-a947-53c3b01a383f",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Removes expired files from UploadThing + D1.
+  "triggers": { "crons": ["*/10 * * * *"] },
+  "vars": {
+    // Used when a tool call does not pass expires_in: "10m", "1h", "1d", "1w", "never", ...
+    "DEFAULT_EXPIRY": "1d",
+    // Largest file accepted (URL imports are streamed; direct uploads are capped at 100 MB by Cloudflare).
+    "MAX_FILE_MB": "512"
+  }
+  // Secret (set with `wrangler secret put UPLOADTHING_TOKEN`): UPLOADTHING_TOKEN
+}
